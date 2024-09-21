@@ -1,0 +1,7 @@
+- 👋 Hi, I’m @HarryPotterhogwarts2
+- 👀 I’m interested in python/c++/scratch
+- 🌱 I’m currently learning python
+- 💞️ I’m looking to collaborate on Liu Ruoyu
+- 📫 How to reach me HarryPotterhogwarts2
+- 😄 Pronouns: HarryPotter
+- ⚡ Fun fact: I'm in China now!

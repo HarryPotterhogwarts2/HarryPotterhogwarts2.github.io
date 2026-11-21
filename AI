@@ -1,0 +1,203 @@
+import chainlit as cl
+import httpx
+import json
+import asyncio
+from typing import Dict, Any, Optional
+
+# Configuration
+SGLANG_BASE_URL = "http://104.171.203.34:30000"
+MODEL_NAME = "Qwen/Qwen3-8B"
+DEFAULT_TEMPERATURE = 0.6
+DEFAULT_TOP_P = 0.95
+DEFAULT_TOP_K = 20
+DEFAULT_MAX_TOKENS = 32768
+
+class SGLangClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.client = httpx.AsyncClient(timeout=300.0)  # 5 minute timeout
+    
+    async def chat_completion(
+        self,
+        messages: list,
+        model: str = MODEL_NAME,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
+        top_k: int = DEFAULT_TOP_K,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        stream: bool = False
+    ) -> Dict[str, Any]:
+        """Send chat completion request to SGLang server"""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "max_tokens": max_tokens,
+            "stream": stream
+        }
+        
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/v1/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            raise Exception(f"HTTP error occurred: {e}")
+        except Exception as e:
+            raise Exception(f"An error occurred: {e}")
+    
+    async def stream_chat_completion(
+        self,
+        messages: list,
+        model: str = MODEL_NAME,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
+        top_k: int = DEFAULT_TOP_K,
+        max_tokens: int = DEFAULT_MAX_TOKENS
+    ):
+        """Stream chat completion from SGLang server"""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "max_tokens": max_tokens,
+            "stream": True
+        }
+        
+        try:
+            async with self.client.stream(
+                "POST",
+                f"{self.base_url}/v1/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    if line.startswith("data: "):
+                        data = line[6:]  # Remove "data: " prefix
+                        if data.strip() == "[DONE]":
+                            break
+                        
+                        try:
+                            json_data = json.loads(data)
+                            if "choices" in json_data and len(json_data["choices"]) > 0:
+                                choice = json_data["choices"][0]
+                                
+                                # Handle both 'delta' (streaming) and 'message' (non-streaming) formats
+                                if "delta" in choice:
+                                    content = choice["delta"].get("content", "")
+                                elif "message" in choice:
+                                    content = choice["message"].get("content", "")
+                                else:
+                                    content = ""
+                                
+                                if content:
+                                    yield content
+                        except json.JSONDecodeError as e:
+                            print(f"JSON decode error: {e}, data: {data}")
+                            continue
+                        except Exception as e:
+                            print(f"Error processing chunk: {e}")
+                            continue
+                            
+        except httpx.HTTPError as e:
+            raise Exception(f"HTTP error occurred: {e}")
+        except Exception as e:
+            raise Exception(f"An error occurred: {e}")
+    
+    async def close(self):
+        await self.client.aclose()
+
+# Initialize the SGLang client
+sglang_client = SGLangClient(SGLANG_BASE_URL)
+
+@cl.on_chat_start
+async def start():
+    """Initialize the chat session"""
+    await cl.Message(
+        content=f"🤖 Connected to SGLang server!\n\n**Model:** {MODEL_NAME}\n**Server:** {SGLANG_BASE_URL}\n\nHello! I'am your AI helper. My name is C-3PO.\nHow can I help your study today?",
+        author="System"
+    ).send()
+
+@cl.on_message
+async def main(message: cl.Message):
+    """Handle incoming messages"""
+    user_message = message.content
+    
+    # Get conversation history from session
+    message_history = cl.user_session.get("message_history", [])
+    
+    # Add user message to history
+    message_history.append({"role": "user", "content": user_message})
+    
+    # Create a message to show we're processing and enable streaming
+    msg = cl.Message(content="")
+    await msg.send()
+    
+    try:
+        # Stream the response token by token
+        full_response = ""
+        async for chunk in sglang_client.stream_chat_completion(message_history):
+            if chunk:  # Only update if we have content
+                full_response += chunk
+                # Stream each chunk to the UI
+                await msg.stream_token(chunk)
+        
+        # Finalize the streamed message
+        await msg.update()
+        
+        # Add assistant response to history
+        if full_response:
+            message_history.append({"role": "assistant", "content": full_response})
+            # Store updated history in session
+            cl.user_session.set("message_history", message_history)
+        
+    except Exception as e:
+        error_msg = f"❌ Error communicating with SGLang server: {str(e)}"
+        await msg.update(content=error_msg)
+
+@cl.on_chat_end
+async def end():
+    """Clean up when chat ends"""
+    await sglang_client.close()
+
+# Optional: Add settings panel
+@cl.on_settings_update
+async def setup_agent(settings):
+    """Handle settings updates"""
+    print(f"Settings updated: {settings}")
+
+# You can add custom settings if needed
+@cl.set_chat_profiles
+async def chat_profile():
+    return [
+        cl.ChatProfile(
+            name="default",
+            markdown_description="Chat with Qwen3-8B via SGLang",
+            icon="🤖",
+        ),
+    ]
+
+if __name__ == "__main__":
+    # This allows running the script directly for development
+    import subprocess
+    import sys
+    
+    try:
+        subprocess.run([sys.executable, "-m", "chainlit", "run", __file__, "--watch"])
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    except Exception as e:
+        print(f"Error: {e}")
+        print("Make sure Chainlit is installed: pip install chainlit")
